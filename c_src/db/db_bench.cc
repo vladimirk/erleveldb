@@ -29,6 +29,7 @@
 //      readrandom    -- read N times in random order
 //      readhot       -- read N times in random order from 1% section of DB
 //      crc32c        -- repeated crc32c of 4K of data
+//      acquireload   -- load N*1000 times
 //   Meta operations:
 //      compact     -- Compact the entire DB
 //      stats       -- Print DB stats
@@ -50,6 +51,7 @@ static const char* FLAGS_benchmarks =
     "crc32c,"
     "snappycomp,"
     "snappyuncomp,"
+    "acquireload,"
     ;
 
 // Number of key/values to place in database
@@ -83,6 +85,9 @@ static int FLAGS_open_files = 0;
 // flag and also specify a benchmark that wants a fresh database, that
 // benchmark will fail.
 static bool FLAGS_use_existing_db = false;
+
+// Use the db with the following name.
+static const char* FLAGS_db = "/tmp/dbbench";
 
 namespace leveldb {
 
@@ -316,14 +321,14 @@ class Benchmark {
     bytes_(0),
     rand_(301) {
     std::vector<std::string> files;
-    Env::Default()->GetChildren("/tmp/dbbench", &files);
+    Env::Default()->GetChildren(FLAGS_db, &files);
     for (int i = 0; i < files.size(); i++) {
       if (Slice(files[i]).starts_with("heap-")) {
-        Env::Default()->DeleteFile("/tmp/dbbench/" + files[i]);
+        Env::Default()->DeleteFile(std::string(FLAGS_db) + "/" + files[i]);
       }
     }
     if (!FLAGS_use_existing_db) {
-      DestroyDB("/tmp/dbbench", Options());
+      DestroyDB(FLAGS_db, Options());
     }
   }
 
@@ -362,7 +367,7 @@ class Benchmark {
         Write(write_options, RANDOM, EXISTING, num_, FLAGS_value_size, 1);
       } else if (name == Slice("fillsync")) {
         write_options.sync = true;
-        Write(write_options, RANDOM, FRESH, num_ / 100, FLAGS_value_size, 1);
+        Write(write_options, RANDOM, FRESH, num_ / 1000, FLAGS_value_size, 1);
       } else if (name == Slice("fill100K")) {
         Write(write_options, RANDOM, FRESH, num_ / 1000, 100 * 1000, 1);
       } else if (name == Slice("readseq")) {
@@ -382,6 +387,8 @@ class Benchmark {
         Compact();
       } else if (name == Slice("crc32c")) {
         Crc32c(4096, "(4K per op)");
+      } else if (name == Slice("acquireload")) {
+        AcquireLoad();
       } else if (name == Slice("snappycomp")) {
         SnappyCompress();
       } else if (name == Slice("snappyuncomp")) {
@@ -420,6 +427,22 @@ class Benchmark {
     message_ = label;
   }
 
+  void AcquireLoad() {
+    int dummy;
+    port::AtomicPointer ap(&dummy);
+    int count = 0;
+    void *ptr = NULL;
+    message_ = "(each op is 1000 loads)";
+    while (count < 100000) {
+      for (int i = 0; i < 1000; i++) {
+        ptr = ap.Acquire_Load();
+      }
+      count++;
+      FinishedSingleOp();
+    }
+    if (ptr == NULL) exit(1); // Disable unused variable warning.
+  }
+
   void SnappyCompress() {
     Slice input = gen_.Generate(Options().block_size);
     int64_t bytes = 0;
@@ -449,13 +472,14 @@ class Benchmark {
     std::string compressed;
     bool ok = port::Snappy_Compress(input.data(), input.size(), &compressed);
     int64_t bytes = 0;
-    std::string uncompressed;
+    char* uncompressed = new char[input.size()];
     while (ok && bytes < 1024 * 1048576) {  // Compress 1G
       ok =  port::Snappy_Uncompress(compressed.data(), compressed.size(),
-                                    &uncompressed);
-      bytes += uncompressed.size();
+                                    uncompressed);
+      bytes += input.size();
       FinishedSingleOp();
     }
+    delete[] uncompressed;
 
     if (!ok) {
       message_ = "(snappy failure)";
@@ -470,7 +494,7 @@ class Benchmark {
     options.create_if_missing = !FLAGS_use_existing_db;
     options.block_cache = cache_;
     options.write_buffer_size = FLAGS_write_buffer_size;
-    Status s = DB::Open(options, "/tmp/dbbench", &db_);
+    Status s = DB::Open(options, FLAGS_db, &db_);
     if (!s.ok()) {
       fprintf(stderr, "open error: %s\n", s.ToString().c_str());
       exit(1);
@@ -486,7 +510,7 @@ class Benchmark {
       }
       delete db_;
       db_ = NULL;
-      DestroyDB("/tmp/dbbench", Options());
+      DestroyDB(FLAGS_db, Options());
       Open();
       Start();  // Do not count time taken to destroy/open
     }
@@ -597,7 +621,7 @@ class Benchmark {
 
   void HeapProfile() {
     char fname[100];
-    snprintf(fname, sizeof(fname), "/tmp/dbbench/heap-%04d", ++heap_counter_);
+    snprintf(fname, sizeof(fname), "%s/heap-%04d", FLAGS_db, ++heap_counter_);
     WritableFile* file;
     Status s = Env::Default()->NewWritableFile(fname, &file);
     if (!s.ok()) {
@@ -645,6 +669,8 @@ int main(int argc, char** argv) {
       FLAGS_cache_size = n;
     } else if (sscanf(argv[i], "--open_files=%d%c", &n, &junk) == 1) {
       FLAGS_open_files = n;
+    } else if (strncmp(argv[i], "--db=", 5) == 0) {
+      FLAGS_db = argv[i] + 5;
     } else {
       fprintf(stderr, "Invalid flag '%s'\n", argv[i]);
       exit(1);
