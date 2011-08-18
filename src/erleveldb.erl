@@ -279,14 +279,15 @@ wb_del0(_Wb, _Key) ->
 init() ->
     ModName = atom_to_list(?MODULE),
     SoName = case code:priv_dir(?MODULE) of
-        {error, bad_name} ->
-            case filelib:is_dir(filename:join(["..", "priv"])) of
-                true ->
-                    filename:join(["..", "priv", ModName]);
-                _ ->
-                    filename:join(["priv", ModName])
+		{error, bad_name} ->
+			case code:which(?MODULE) of
+				Filename when is_list(Filename) ->
+					filename:join([filename:dirname(Filename),"../priv", ModName]);
+				_ ->
+					filename:join("../priv", ModName)
             end;
         Dir ->
-            filename:join(Dir, ModName)
-    end,
-    erlang:load_nif(SoName, 0).
+			filename:join(Dir, ModName)
+	end,
+	erlang:load_nif(SoName, 0).		
+
